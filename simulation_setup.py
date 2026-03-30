@@ -208,6 +208,7 @@ def setup_simulation(dt=1.0 / 60.0, settle_frames=60, gui=True):
 
     return car_id, steering_joints, motor_joints
 
+# ---------------- Image processing ----------------
 def cutter(x ,i,w):
     if(x+i>=w):
         return 2*w-x-i-1
@@ -237,6 +238,7 @@ def blurring(img):
     )
     
     return blur_v
+
 def pyramiding(img):
     h,w=img.shape
     blurring_img=cv2.GaussianBlur(img.astype(np.float32), (31,31), 10)
@@ -288,37 +290,56 @@ def make_patch(img, x, y, r,w,h):
     )
 
     return patch.astype(np.float32)
+
+    # ---------------- Optical flow core ----------------
         
 def track_one_point(old_gray, new_gray, Ix, Iy, x0, y0, r, max_iters, eps, det_thresh):
-    h,w  = old_gray.shape
-    x = float(x0)
-    y = float(y0)
-    temp = make_patch(old_gray, x0, y0, r,w,h)
-    gx = make_patch(Ix, x, y, r,w,h)
-    gy = make_patch(Iy, x, y, r,w,h)
+    """
+    Iterative Lucas-Kanade tracking for a single feature point.
+    """
+
+    x, y = float(x0), float(y0)
+
+    # Reference patch
+    template = make_patch(old_gray, x0, y0, r, *old_gray.shape)
+
+    # Gradients (assumed constant)
+    gx = make_patch(Ix, x, y, r, *old_gray.shape)
+    gy = make_patch(Iy, x, y, r, *old_gray.shape)
+
+    # Structure tensor
     A00 = np.sum(gx * gx)
     A01 = np.sum(gx * gy)
     A11 = np.sum(gy * gy)
+
     det = A00 * A11 - A01 * A01
-    if temp is None:
-        return None
-    for i in range(max_iters):
-        cur = make_patch(new_gray, x, y, r,w,h)
-        if abs(det) < det_thresh:
+
+    if abs(det) < det_thresh:
+        return None  # Ill-conditioned → unreliable tracking
+
+    for _ in range(max_iters):
+        current = make_patch(new_gray, x, y, r, *old_gray.shape)
+
+        if current is None:
             return None
-        if cur is None or gx is None or gy is None:
-            return None
-        It = temp - cur
+
+        It = template - current
+
+        # Solve linear system
         b0 = -np.sum(gx * It)
         b1 = -np.sum(gy * It)
+
         dx = (A11 * b0 - A01 * b1) / det
         dy = (-A01 * b0 + A00 * b1) / det
-        x = x - dx
-        y = y - dy
-        if (dx * dx + dy * dy) ** 0.5 < eps:
-            return (x, y)
-    return None
 
+        x -= dx
+        y -= dy
+
+        # Convergence check
+        if np.hypot(dx, dy) < eps:
+            return (x, y)
+
+    return None
 def lucac_kandere(old, new,p0, r, maxlevel, max_cnt, eps,det_thresh):
     p1= []
     ix, iy= gradient(old)
@@ -567,7 +588,7 @@ def get_obstacle_mask(rgb,flow_map, gray, foe):
     )
 
     clean = cv2.bitwise_or(clean, yellow_mask)
-
+    cv2.imshow("cle",clean)
     return clean
 
 def compute_disturbance(flow_map):
@@ -616,8 +637,8 @@ def radial_error(flow_map, foe):
     return 1 - cos  
     
 def compute_repel_force(clean,flow_map,foe,ttc):
-    gamma_x=2.0
-    gamma_y=20.0
+    gamma_x=30.0
+    gamma_y=50.0
     if clean is None:
         return 0,0
     dist = compute_disturbance(flow_map)
@@ -625,8 +646,15 @@ def compute_repel_force(clean,flow_map,foe,ttc):
     dist = dist / (dist.max() + 1e-6)
     A_mask = (dist > 0.2) & (dir_err > 0.2)
     g = cv2.GaussianBlur(A_mask.astype(np.float32)/255.0, (31,31), 10)
+    
     Fx = gamma_x * np.mean(ttc[A_mask]) if ttc is not None else 0
     Fy = gamma_y * np.mean(g[A_mask]) 
+    strength = 1.0 / (ttc + 1e-3)
+    weight_y = (foe[1] / height)**2
+
+    strength = strength * weight_y
+    Fx*=strength
+    Fy*=strength
     return Fx,Fy
 
 def detect_lane_edges(gray):
@@ -774,7 +802,7 @@ def project_point(goal_world, view_matrix, proj_matrix):
 
 goal_world = [31.66, 0, 0.5]
 
-def goal_potential(width, height, goal_px, alpha=50):
+def goal_potential(width, height, goal_px, alpha):
     gx, gy = goal_px
 
     Y, X = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
@@ -801,7 +829,7 @@ def goal_pipeline(goal_world, view_matrix, proj_matrix, width, height):
     if goal_px is None:
         goal_px = (width//2, int(height*0.2)) 
 
-    U = goal_potential(width, height, goal_px, alpha=0.001)
+    U = goal_potential(width, height, goal_px, alpha=50.0)
 
     Fx, Fy = goal_force(U)
 
@@ -818,7 +846,9 @@ def compute_control(Fx, Fy):
 
     Fx_roi = Fx[y1:y2, x1:x2]
     Fy_roi = Fy[y1:y2, x1:x2]
-
+    weights = np.linspace(0.5, 2.0, Fy_roi.shape[0])[:, None]
+    Fx_roi *= weights
+    Fy_roi *= weights
     fx = np.mean(Fx_roi)
     fy = np.mean(Fy_roi)
 
@@ -834,20 +864,7 @@ def transform_force(Fx_global, Fy_global, yaw):
 
     return Fx, Fy
 
-def compute_steering(Fy,Fx, lf=0.5, lr=0.5):
-    theta_d = np.arctan2(Fy, Fx)
-    return np.arctan(((lf + lr) / lr) * np.tan(theta_d))
-
 def draw_force_field(img, Fx, Fy, step=20, scale=10, color=(0, 0, 255)):
-    """
-    Draw a force field on an image.
-    
-    Parameters:
-    - img : np.array : BGR image
-    - Fx, Fy : np.array : force maps (same shape as img height x width)
-    - step : int : spacing between vectors
-    - scale : float : factor to scale vector length for visualization
-    """
     vis = img.copy()
     h, w = Fx.shape
     Fx/=Fx.max()
@@ -863,6 +880,12 @@ def draw_force_field(img, Fx, Fy, step=20, scale=10, color=(0, 0, 255)):
     
     
     cv2.waitKey(1)
+def theta_dcalc(fy,fx):
+    norm = np.sqrt(fx**2 + fy**2) + 1e-6
+    fx /= norm
+    fy /= norm
+    theta_d = np.arctan2(fy,fx)
+    return theta_d
 
 feature_params = dict(maxCorners=200, qualityLevel=0.007, minDistance=2, blockSize=5)
 lk_params = dict(r=6,maxlevel=3,max_cnt=17,eps=0.005,det_thresh=1e-3)
@@ -882,7 +905,7 @@ if __name__ == "__main__":
         mask=None
         prev_foe=None
         alpha = 0.8
-        v = 400.0  
+        speed = 2.0  # base speed 
         while True:
             p.stepSimulation()
             time.sleep(dt)
@@ -906,21 +929,16 @@ if __name__ == "__main__":
                     # if pos outside bounds
                     fx, fy = 0.0, 0.0
                 
-            norm = np.sqrt(fx**2 + fy**2) + 1e-6
-            fx /= norm
-            fy /= norm
-            theta_d = np.arctan2(fy,fx)
-
+            theta_d = theta_dcalc(fy,fx)
             lf,lr=0.5,0.5
             delta_f = np.arctan(((lf + lr)/lr) * np.tan(theta_d))
             delta_f = np.clip(delta_f, -0.5, 0.5)
-            speed = 5.0  # base speed
-            if fx < 0:
-                speed = 1.0
-            speed = 2.0 + 2.0 * fx *dt 
-            speed = np.clip(speed, 0.5, 5.0)
+            if fx>0:
+                speed = speed + 1.0 * fx *dt 
+            speed = np.clip(speed, 1.0, 5.0)
             print(pos[0])
             print(pos[1])
+            print(speed)
             # Spin the wheels at a gentle speed so you can see the car move
             for j in steer_j:
                 p.setJointMotorControl2(car_id, j,
