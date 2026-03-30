@@ -156,7 +156,7 @@ def lucac_kandere(old, new,p0, r, maxlevel, max_cnt, eps,det_thresh):
 
 feature_params = dict(maxCorners=50, qualityLevel=0.01, minDistance=5, blockSize=7)
 lk_params = dict(r=6,maxlevel=3,max_cnt=10,eps=0.01,det_thresh=1e-3)
-cap = cv2.VideoCapture(r"C:\Users\Samar Tandon\Downloads\hmmm\OPTICAL_FLOW.mp4")
+cap = cv2.VideoCapture("OPTICAL_FLOW.mp4")
 ret, old = cap.read()
 if not ret:
     print("bad video")
