@@ -1,10 +1,6 @@
 import cv2
 import numpy as np
-def cutter(x ,i,w):
-    if(x+i>=w):
-        return 2*w-x-i-1
-    else:
-        return x+i
+
 def blurring(img):
     img = img.astype(np.float32)
     h, w = img.shape
