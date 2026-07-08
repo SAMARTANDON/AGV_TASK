@@ -4,7 +4,7 @@ import numpy as np
 def ranging(x,y,x0,y0):
     if x>x0: 
         return x0
-    if yy>y0:
+    if y>y0:
         return y0
         
 def blurring(img):
