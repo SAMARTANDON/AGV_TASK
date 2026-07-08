@@ -1,6 +1,12 @@
 import cv2
 import numpy as np
-
+ 
+def ranging(x,y,x0,y0):
+    if x>x0: 
+        return x0
+    if yy>y0:
+        return y0
+        
 def blurring(img):
     img = img.astype(np.float32)
     h, w = img.shape
